@@ -29,8 +29,16 @@ echo "FPS               : 30"
 echo "========================================"
 
 FONT="font.ttf"
-GOLD="0xE8A33D"
-RED="0xE8453C"
+# Premium NASA/documentary palette: deep space navy panel, a cooler
+# refined gold (less "orange", more brushed-metal), a muted signal red
+# for the LIVE indicator, and a cool silver-blue for secondary/technical
+# text (timestamps, labels, dividers) so the panel reads less like a
+# generic banner and more like a broadcast graphics package.
+GOLD="0xC9A227"
+GOLD_DIM="0x8C7220"
+RED="0xD64545"
+NAVY="0x0A0E16"
+SILVER="0x9FB3C8"
 ASSET_DIR="panel_assets"
 INFO_FILE="galaxy_info.txt"
 SLOT=6            # seconds each headline is shown
@@ -93,7 +101,7 @@ mkdir -p "$ASSET_DIR"
 # have a matching .labels.txt file.
 #############################################
 DOT_MARKER="dot_marker.png"
-GOLD_R=232; GOLD_G=163; GOLD_B=61
+GOLD_R=201; GOLD_G=162; GOLD_B=39
 DOT_VF="format=rgba,geq=r=(if(lte(hypot(X-10\,Y-10)\,5)\,${GOLD_R}\,if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))):g=(if(lte(hypot(X-10\,Y-10)\,5)\,${GOLD_G}\,if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))):b=(if(lte(hypot(X-10\,Y-10)\,5)\,${GOLD_B}\,if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))):a=(if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))"
 ffmpeg -y -f lavfi -i "color=c=black@0.0:s=20x20" -vf "$DOT_VF" -frames:v 1 "$DOT_MARKER" -loglevel error
 if [ ! -s "$DOT_MARKER" ]; then
@@ -500,6 +508,8 @@ build_labels_chain() {
 # Per-video override: if files named
 #   <basename>.headlines.txt
 #   <basename>.facts.txt
+#   <basename>.category.txt   (optional short chip label, e.g. "COMETS")
+#   <basename>.nofacts        (optional empty flag file — hides facts)
 # exist (basename = video filename without
 # extension — same derivation used for the
 # up-next bumper title), they're used verbatim,
@@ -518,6 +528,36 @@ prepare_video_content() {
     local base
     base="${url##*/}"
     base="${base%.*}"
+
+    # Segment counter globals are set by the main stream loop before
+    # calling run_video(); default them here too so this function stays
+    # safe to call standalone (e.g. future tooling/tests).
+    : "${CURRENT_INDEX:=1}"
+    : "${TOTAL_VIDEOS:=1}"
+
+    # Optional category chip (e.g. "EXOPLANETS", "BLACK HOLES") shown
+    # next to the section header when a <basename>.category.txt file
+    # exists for this video. Purely additive — if the file is missing
+    # or empty, no chip is drawn at all.
+    SHOW_CATEGORY=false
+    if [ -f "${base}.category.txt" ]; then
+        CATEGORY_TEXT="$(head -n1 "${base}.category.txt" | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        if [ -n "$CATEGORY_TEXT" ]; then
+            printf '%s' "$CATEGORY_TEXT" > "$ASSET_DIR/category.txt"
+            SHOW_CATEGORY=true
+        fi
+    fi
+
+    # Optional per-video flag to hide the "DID YOU KNOW" fact panel —
+    # useful for videos whose footage is already text-heavy (e.g. an
+    # infographic clip) where a second block of text would compete for
+    # attention rather than add to it. Create an empty file named
+    # <basename>.nofacts next to the video to suppress it.
+    SHOW_FACTS=true
+    if [ -f "${base}.nofacts" ]; then
+        SHOW_FACTS=false
+        echo "NOTICE: ${base}.nofacts present — hiding the fact panel for this video."
+    fi
 
     # FIX: same reasoning as build_labels_chain() above — this function
     # is also called once per video from inside the outer stream loop
@@ -608,7 +648,10 @@ prepare_video_content() {
     #########################################
     # Rebuild BASE_CHAIN for this video's content
     #########################################
-    CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
+    # Gentle vignette on the raw footage gives the frame a cinematic,
+    # "shot on a documentary camera" depth instead of a flat, clinical
+    # rectangle — subtle enough not to darken the subject itself.
+    CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,vignette=PI/6[video];"
     CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
     CHAIN+="[ovl][video]overlay=0:0[base];"
 
@@ -617,31 +660,67 @@ prepare_video_content() {
     build_labels_chain "$url"
     CHAIN+="$LABELS_CHAIN"
 
-    CHAIN+="${LABELS_OUT}drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
-    CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=black@0.45:t=fill[p2];"
-    CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=black@0.30:t=fill[p3];"
-    CHAIN+="[p3]drawbox=x=341:y=0:w=4:h=720:color=black@0.15:t=fill[p4];"
-    CHAIN+="[p4]drawbox=x=0:y=0:w=347:h=4:color=${GOLD}@0.9:t=fill[p5];"
-    CHAIN+="[p5]drawbox=x=345:y=0:w=2:h=720:color=${GOLD}@0.6:t=fill[p6];"
+    # The entire left info panel is built on its own transparent RGBA
+    # canvas (rather than drawn directly onto the video) so that, once
+    # complete, it can be faded and slid in as a single unit each time a
+    # new video starts — see the fade/overlay merge at the end of this
+    # function. format=rgba guarantees an alpha channel survives through
+    # every drawbox/drawtext step below.
+    CHAIN+="color=c=black@0.0:s=1280x720:r=30,format=rgba[panelcanvas];"
 
-    CHAIN+="[p6]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
-    CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[p8];"
+    # Panel background: layered navy fill with a soft feathered edge
+    # (five descending-opacity steps instead of a hard cutoff) so the
+    # panel reads as a deep, glass-like plate rather than a flat black
+    # rectangle stamped over the footage.
+    CHAIN+="[panelcanvas]drawbox=x=0:y=0:w=333:h=720:color=${NAVY}@0.82:t=fill[p1];"
+    CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=${NAVY}@0.62:t=fill[p2];"
+    CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=${NAVY}@0.42:t=fill[p3];"
+    CHAIN+="[p3]drawbox=x=341:y=0:w=4:h=720:color=${NAVY}@0.24:t=fill[p3b];"
+    CHAIN+="[p3b]drawbox=x=345:y=0:w=3:h=720:color=${NAVY}@0.10:t=fill[p4];"
+    CHAIN+="[p4]drawbox=x=0:y=0:w=348:h=3:color=${GOLD}@0.9:t=fill[p5];"
+    CHAIN+="[p5]drawbox=x=348:y=0:w=1:h=720:color=${GOLD}@0.45:t=fill[p6];"
 
-    CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=15:x=313-text_w:y=19[p9];"
+    # LIVE badge: a proper capsule plate (thin gold outline + dark fill)
+    # behind the pulsing dot and label, instead of the dot/text floating
+    # bare on the panel — reads like a real broadcast lower-third chip.
+    CHAIN+="[p6]drawbox=x=22:y=16:w=100:h=30:color=black@0.5:t=fill[p6a];"
+    CHAIN+="[p6a]drawbox=x=22:y=16:w=100:h=30:color=${GOLD}@0.55:t=1[p6b];"
+    CHAIN+="[p6b]drawbox=x=34:y=27:w=10:h=10:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
+    CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=20:x=52:y=23[p8];"
+
+    CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=${SILVER}@0.85:fontsize=14:x=313-text_w:y=19[p9];"
     CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=14:x=313-text_w:y=39[p10];"
-    CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/subs.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=57[p10b];"
-    CHAIN+="[p10b]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/viewers.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=75[p10c];"
+    CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/subs.txt:reload=1:fontcolor=${SILVER}@0.85:fontsize=13:x=313-text_w:y=57[p10b];"
+    CHAIN+="[p10b]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/viewers.txt:reload=1:fontcolor=${SILVER}@0.85:fontsize=13:x=313-text_w:y=75[p10c];"
 
-    CHAIN+="[p10c]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=23:x=33:y=95:${SHADOW}[p11];"
-    CHAIN+="[p11]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=white@0.85:fontsize=17:x=33:y=124:${SHADOW}[p12];"
-    CHAIN+="[p12]drawbox=x=33:y=155:w=280:h=2:color=white@0.3:t=fill[p13];"
+    # Kicker tag first (small gold tag with a left tick, documentary
+    # "series eyebrow" style), then the main title, then the section
+    # header directly above the rotating headline it belongs to — a
+    # clearer reading order than the old title->header->eyebrow stack.
+    CHAIN+="[p10c]drawbox=x=33:y=104:w=3:h=11:color=${GOLD}:t=fill[p10d];"
+    CHAIN+="[p10d]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${GOLD}:fontsize=12:x=45:y=104[p11a];"
 
-    CHAIN+="[p13]drawbox=x=33:y=171:w=8:h=8:color=${GOLD}:t=fill[p14];"
-    CHAIN+="[p14]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=15:x=49:y=168[p15];"
+    CHAIN+="[p11a]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=24:x=33:y=128:${SHADOW}[p11];"
+    CHAIN+="[p11]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=${SILVER}:fontsize=16:x=33:y=158:${SHADOW}[p12];"
+    CHAIN+="[p12]drawbox=x=33:y=186:w=280:h=1:color=${GOLD}@0.35:t=fill[p13];"
 
-    CHAIN+="[p15]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=210[p16];"
+    CHAIN+="[p13]drawbox=x=33:y=202:w=8:h=8:color=${GOLD}:t=fill[p14];"
+    CHAIN+="[p14]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=15:x=49:y=199[p16];"
 
     local prev="p16"
+    if [ "$SHOW_CATEGORY" = true ]; then
+        local cat_w=$(( ${#CATEGORY_TEXT} * 8 + 24 ))
+        [ "$cat_w" -lt 70 ] && cat_w=70
+        [ "$cat_w" -gt 160 ] && cat_w=160
+        local cat_x=$((313 - cat_w))
+        # Aligned with the short kicker row (y=104), not the wide
+        # letter-spaced "TODAY'S DISCOVERY" header row below it, which
+        # runs edge-to-edge and would collide with a right-aligned chip.
+        CHAIN+="[${prev}]drawbox=x=${cat_x}:y=100:w=${cat_w}:h=20:color=${NAVY}@0.9:t=fill[catbg];"
+        CHAIN+="[catbg]drawbox=x=${cat_x}:y=100:w=${cat_w}:h=20:color=${GOLD}@0.6:t=1[catout];"
+        CHAIN+="[catout]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/category.txt:fontcolor=${GOLD}:fontsize=11:x=$((cat_x + 10)):y=106[catxt];"
+        prev="catxt"
+    fi
     for i in "${!RAW_LINES[@]}"; do
         idx=$((i + 1))
         local start=$((i * SLOT))
@@ -652,8 +731,8 @@ prepare_video_content() {
         prev="$nxt"
     done
 
-    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:text='STORY PROGRESS':fontcolor=white@0.35:fontsize=9:x=33:y=$((PROGRESS_Y - 15))[pgcap];"
-    CHAIN+="[pgcap]drawbox=x=33:y=${PROGRESS_Y}:w=280:h=2:color=white@0.15:t=fill[pg1];"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:text='STORY ${CURRENT_INDEX} OF ${TOTAL_VIDEOS}':fontcolor=${SILVER}@0.55:fontsize=9:x=33:y=$((PROGRESS_Y - 15))[pgcap];"
+    CHAIN+="[pgcap]drawbox=x=33:y=${PROGRESS_Y}:w=280:h=2:color=${SILVER}@0.18:t=fill[pg1];"
     CHAIN+="[pg1]drawbox=x=33:y=${PROGRESS_Y}:w='280*(mod(t\,${SLOT}))/${SLOT}':h=2:color=${GOLD}:t=fill[pg2];"
     prev="pg2"
 
@@ -682,21 +761,32 @@ prepare_video_content() {
         fi
     done
 
-    CHAIN+="[${prev}]drawbox=x=33:y=${FACT_DIVIDER_Y}:w=280:h=2:color=${GOLD}@0.4:t=fill[fp1];"
-    CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=${FACT_LABEL_Y}[fp2];"
-    prev="fp2"
-    for i in "${!FACTS[@]}"; do
-        idx=$((i + 1))
-        local start=$((i * FACT_SLOT))
-        local end=$((start + FACT_SLOT))
-        local nxt="f${idx}"
-        local FALPHA="if(between(mod(t\,${FACT_CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${FACT_CYCLE})-${start}\,0.6)\,(mod(t\,${FACT_CYCLE})-${start})/0.6\,if(gt(mod(t\,${FACT_CYCLE})-${start}\,${FACT_SLOT}-0.6)\,(${end}-mod(t\,${FACT_CYCLE}))/0.6\,1))\,0)"
-        CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact${idx}.txt:fontcolor=white@0.9:fontsize=16:line_spacing=7:x=33:y=${FACT_TEXT_Y}:alpha='${FALPHA}'[${nxt}];"
-        prev="$nxt"
-    done
+    if [ "$SHOW_FACTS" = true ]; then
+        CHAIN+="[${prev}]drawbox=x=33:y=${FACT_DIVIDER_Y}:w=280:h=2:color=${GOLD}@0.4:t=fill[fp1];"
+        CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=${FACT_LABEL_Y}[fp2];"
+        prev="fp2"
+        for i in "${!FACTS[@]}"; do
+            idx=$((i + 1))
+            local start=$((i * FACT_SLOT))
+            local end=$((start + FACT_SLOT))
+            local nxt="f${idx}"
+            local FALPHA="if(between(mod(t\,${FACT_CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${FACT_CYCLE})-${start}\,0.6)\,(mod(t\,${FACT_CYCLE})-${start})/0.6\,if(gt(mod(t\,${FACT_CYCLE})-${start}\,${FACT_SLOT}-0.6)\,(${end}-mod(t\,${FACT_CYCLE}))/0.6\,1))\,0)"
+            CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact${idx}.txt:fontcolor=white@0.9:fontsize=16:line_spacing=7:x=33:y=${FACT_TEXT_Y}:alpha='${FALPHA}'[${nxt}];"
+            prev="$nxt"
+        done
+    fi
+
+    # Panel entrance: fade the finished panel canvas in (alpha 0->1 over
+    # its first 0.5s) while sliding it in a short distance from the
+    # left, then composite it onto the video+labels plate. Each call to
+    # run_video() launches a fresh ffmpeg process per video, so t=0 here
+    # really is "this video just started" — the panel animates in every
+    # time the stream cuts to a new clip instead of just sitting there.
+    CHAIN+="[${prev}]fade=t=in:st=0:d=0.5:alpha=1[panel_faded];"
+    CHAIN+="${LABELS_OUT}[panel_faded]overlay=x='if(lt(t\,0.5)\,-40*(1-t/0.5)\,0)':y=0:eval=frame[with_panel];"
 
     BASE_CHAIN="$CHAIN"
-    FACT_END="$prev"
+    FACT_END="with_panel"
 }
 
 #############################################
@@ -716,8 +806,13 @@ build_final_filter() {
     local CTA_ENABLE="between(mod(t\,${CTA_CYCLE})\,0\,${CTA_SHOW})"
     local COUNTDOWN_ENABLE="not(${CTA_ENABLE})"
 
-    tail+="[${FACT_END}]drawbox=x=733:y=620:w=507:h=43:color=black@0.75:t=fill[cta_bg];"
-    tail+="[cta_bg]drawbox=x=733:y=620:w=4:h=43:color=${GOLD}:t=fill[cta_bar];"
+    # CTA capsule: soft outer glow (a slightly larger, dimmer gold box
+    # behind the plate) plus a navy fill and a thin outline, reading
+    # like a premium broadcast lower-third instead of a flat rectangle.
+    tail+="[${FACT_END}]drawbox=x=729:y=616:w=515:h=51:color=${GOLD}@0.12:t=fill[cta_glow];"
+    tail+="[cta_glow]drawbox=x=733:y=620:w=507:h=43:color=${NAVY}@0.85:t=fill[cta_bg];"
+    tail+="[cta_bg]drawbox=x=733:y=620:w=507:h=43:color=${GOLD}@0.4:t=1[cta_outline];"
+    tail+="[cta_outline]drawbox=x=733:y=620:w=4:h=43:color=${GOLD}:t=fill[cta_bar];"
     tail+="[cta_bar]drawbox=x=755:y=636:w=11:h=11:color=${RED}:t=fill:enable='${CTA_ENABLE}'[cta_dot];"
     tail+="[cta_dot]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/cta.txt:fontcolor=white:fontsize=19:x=773:y=633:alpha='${CTA_ALPHA}'[cta_sub];"
 
@@ -727,14 +822,21 @@ build_final_filter() {
         tail+="[cta_sub]drawtext=fontfile=${FONT}:text='Coming up next...':fontcolor=white@0.85:fontsize=19:x=773:y=633:enable='${COUNTDOWN_ENABLE}'[cta_final];"
     fi
 
-    tail+="[cta_final]drawbox=x=0:y=680:w=1280:h=40:color=black@0.72:t=fill[tk1];"
+    # Bottom ticker: layered navy plate (two steps for a soft top edge)
+    # with a slim gold hairline, and a refined "ON AIR" tag replacing the
+    # old flat gold BULLETIN block — same function, a cleaner broadcast
+    # aesthetic.
+    tail+="[cta_final]drawbox=x=0:y=678:w=1280:h=2:color=${GOLD}@0.35:t=fill[tk0];"
+    tail+="[tk0]drawbox=x=0:y=680:w=1280:h=40:color=${NAVY}@0.80:t=fill[tk1];"
     tail+="[tk1]drawbox=x=0:y=680:w=1280:h=2:color=${GOLD}@0.9:t=fill[tk2];"
     tail+="[tk2]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=17:borderw=2:bordercolor=black@0.6:y=695:x='w-mod(t*${TICKER_SPEED}\,text_w+w)'[tk3];"
-    tail+="[tk3]drawbox=x=0:y=680:w=120:h=40:color=black@0.85:t=fill[tk4];"
-    tail+="[tk4]drawbox=x=0:y=682:w=113:h=38:color=${GOLD}:t=fill[tk5];"
-    tail+="[tk5]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=16:x=17:y=695[tk6];"
+    tail+="[tk3]drawbox=x=0:y=680:w=124:h=40:color=${NAVY}@0.95:t=fill[tk4];"
+    tail+="[tk4]drawbox=x=0:y=682:w=117:h=1:color=${GOLD}@0.7:t=fill[tk4b];"
+    tail+="[tk4b]drawbox=x=113:y=682:w=2:h=36:color=${GOLD}@0.5:t=fill[tk5];"
+    tail+="[tk5]drawbox=x=17:y=690:w=8:h=8:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[tk5b];"
+    tail+="[tk5b]drawtext=fontfile=${FONT}:text='ON AIR':fontcolor=${GOLD}:fontsize=15:x=33:y=693[tk6];"
 
-    tail+="[tk6]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.45:fontsize=15:borderw=1.5:bordercolor=black@0.7:x=353:y=655[wm1];"
+    tail+="[tk6]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=${SILVER}@0.5:fontsize=15:borderw=1.5:bordercolor=black@0.7:x=353:y=655[wm1];"
 
     # Pulsing ring around the subscribe icon (baked into overlay.png at
     # SUB_ICON_X/SUB_ICON_Y) — visible for 1s out of every 3s, so it
@@ -745,7 +847,25 @@ build_final_filter() {
     local sub_ring_d=$((SUB_ICON_R * 2))
     tail+="[wm1]drawbox=x=${sub_ring_x}:y=${sub_ring_y}:w=${sub_ring_d}:h=${sub_ring_d}:color=${GOLD}@0.9:t=3:enable='${SUB_PULSE_ENABLE}'[wm2];"
 
-    tail+="[wm2]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
+    # Broadcast-style corner frame brackets (thin gold L-marks inset from
+    # each edge) — a classic documentary/mission-control framing touch
+    # that reads as intentional composition rather than a raw video feed.
+    local CL=34   # bracket arm length
+    local CI=16   # inset from the frame edge
+    local CT=2    # bracket line thickness
+    tail+="[wm2]drawbox=x=${CI}:y=${CI}:w=${CL}:h=${CT}:color=${GOLD}@0.5:t=fill[cf1];"
+    tail+="[cf1]drawbox=x=${CI}:y=${CI}:w=${CT}:h=${CL}:color=${GOLD}@0.5:t=fill[cf2];"
+    tail+="[cf2]drawbox=x=$((1280 - CI - CL)):y=${CI}:w=${CL}:h=${CT}:color=${GOLD}@0.5:t=fill[cf3];"
+    tail+="[cf3]drawbox=x=$((1280 - CI - CT)):y=${CI}:w=${CT}:h=${CL}:color=${GOLD}@0.5:t=fill[cf4];"
+    tail+="[cf4]drawbox=x=${CI}:y=$((720 - CI - CT)):w=${CL}:h=${CT}:color=${GOLD}@0.5:t=fill[cf5];"
+    tail+="[cf5]drawbox=x=${CI}:y=$((720 - CI - CL)):w=${CT}:h=${CL}:color=${GOLD}@0.5:t=fill[cf6];"
+    tail+="[cf6]drawbox=x=$((1280 - CI - CL)):y=$((720 - CI - CT)):w=${CL}:h=${CT}:color=${GOLD}@0.5:t=fill[cf7];"
+    tail+="[cf7]drawbox=x=$((1280 - CI - CT)):y=$((720 - CI - CL)):w=${CT}:h=${CL}:color=${GOLD}@0.5:t=fill[cf8];"
+
+    # Sealed-frame finish: a hairline gold border reinforces the
+    # broadcast-package feel; the flat black vignette box is gone now
+    # that the actual footage carries a real vignette filter.
+    tail+="[cf8]drawbox=x=0:y=0:w=1280:h=720:color=${GOLD}@0.25:t=1[final]"
 
     echo "$tail"
 }
@@ -782,16 +902,26 @@ run_bumper() {
     fade_out_start=$(awk -v d="$BUMPER_DURATION" 'BEGIN{print d - 0.6}')
 
     local BFILTER
-    BFILTER="[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720[bg];"
-    BFILTER+="[bg]drawbox=x=0:y=0:w=1280:h=720:color=black@0.55:t=fill[b1];"
-    BFILTER+="[b1]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[b2];"
-    BFILTER+="[b2]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[b3];"
-    BFILTER+="[b3]drawbox=x=0:y=313:w=1280:h=2:color=${GOLD}@0.8:t=fill[b4];"
+    BFILTER="[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,vignette=PI/6[bg];"
+    BFILTER+="[bg]drawbox=x=0:y=0:w=1280:h=720:color=${NAVY}@0.72:t=fill[b1a];"
+    BFILTER+="[b1a]drawbox=x=22:y=16:w=100:h=30:color=black@0.5:t=fill[b1b];"
+    BFILTER+="[b1b]drawbox=x=22:y=16:w=100:h=30:color=${GOLD}@0.55:t=1[b1c];"
+    BFILTER+="[b1c]drawbox=x=34:y=27:w=10:h=10:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[b2];"
+    BFILTER+="[b2]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=20:x=52:y=23[b3];"
+    BFILTER+="[b3]drawbox=x=340:y=313:w=600:h=1:color=${GOLD}@0.6:t=fill[b4];"
     BFILTER+="[b4]drawtext=fontfile=${FONT}:text='UP NEXT':fontcolor=${GOLD}:fontsize=22:x=(w-text_w)/2:y=260[b5];"
     BFILTER+="[b5]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_title.txt:fontcolor=white:fontsize=36:line_spacing=8:x=(w-text_w)/2:y=347:${SHADOW}[b6];"
-    BFILTER+="[b6]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_sub.txt:fontcolor=white@0.75:fontsize=18:x=(w-text_w)/2:y=427[b7];"
-    BFILTER+="[b7]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.4:fontsize=14:x=(w-text_w)/2:y=470[b8];"
-    BFILTER+="[b8]fade=t=in:st=0:d=0.5,fade=t=out:st=${fade_out_start}:d=0.6[final]"
+    BFILTER+="[b6]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_sub.txt:fontcolor=${SILVER}@0.85:fontsize=18:x=(w-text_w)/2:y=427[b7];"
+    BFILTER+="[b7]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=${SILVER}@0.5:fontsize=14:x=(w-text_w)/2:y=470[b8];"
+    BFILTER+="[b8]drawbox=x=16:y=16:w=34:h=2:color=${GOLD}@0.5:t=fill[bc1];"
+    BFILTER+="[bc1]drawbox=x=16:y=16:w=2:h=34:color=${GOLD}@0.5:t=fill[bc2];"
+    BFILTER+="[bc2]drawbox=x=1230:y=16:w=34:h=2:color=${GOLD}@0.5:t=fill[bc3];"
+    BFILTER+="[bc3]drawbox=x=1262:y=16:w=2:h=34:color=${GOLD}@0.5:t=fill[bc4];"
+    BFILTER+="[bc4]drawbox=x=16:y=670:w=34:h=2:color=${GOLD}@0.5:t=fill[bc5];"
+    BFILTER+="[bc5]drawbox=x=16:y=636:w=2:h=34:color=${GOLD}@0.5:t=fill[bc6];"
+    BFILTER+="[bc6]drawbox=x=1230:y=670:w=34:h=2:color=${GOLD}@0.5:t=fill[bc7];"
+    BFILTER+="[bc7]drawbox=x=1262:y=636:w=2:h=34:color=${GOLD}@0.5:t=fill[bc8];"
+    BFILTER+="[bc8]fade=t=in:st=0:d=0.5,fade=t=out:st=${fade_out_start}:d=0.6[final]"
 
     ffmpeg \
     -hide_banner \
@@ -947,6 +1077,11 @@ while true; do
         url="${URLS[$i]}"
         next_idx=$(( (i + 1) % NUM_URLS ))
         next_url="${URLS[$next_idx]}"
+
+        # Read by prepare_video_content() to render the "STORY X OF Y"
+        # segment counter next to the progress bar.
+        CURRENT_INDEX=$((i + 1))
+        TOTAL_VIDEOS=$NUM_URLS
 
         run_video "$url"
 
