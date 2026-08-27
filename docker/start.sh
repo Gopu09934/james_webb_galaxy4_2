@@ -660,25 +660,17 @@ prepare_video_content() {
     build_labels_chain "$url"
     CHAIN+="$LABELS_CHAIN"
 
-    # Panel entrance: split the video+labels plate into two identical
-    # copies. One (panel_bg) stays untouched; the other (panel_src) gets
-    # the entire panel drawn on top of it exactly as before — drawbox's
-    # own alpha blending, which only works correctly when painting onto
-    # a normal opaque frame (as it does here), not onto a transparent
-    # RGBA canvas (an earlier version of this script tried that and the
-    # panel silently rendered with zero effective opacity — verified via
-    # pixel inspection, not just visual guesswork). The two copies are
-    # crossfaded together at the end of this function using `blend`,
-    # which ramps per-pixel over real timestamps and needs no alpha
-    # channel at all, so the panel fades in cleanly every time a new
-    # video starts without depending on that broken path.
-    CHAIN+="${LABELS_OUT}split=2[panel_bg][panel_src];"
-
-    # Panel background: layered navy fill with a soft feathered edge
-    # (five descending-opacity steps instead of a hard cutoff) so the
-    # panel reads as a deep, glass-like plate rather than a flat black
-    # rectangle stamped over the footage.
-    CHAIN+="[panel_src]drawbox=x=0:y=0:w=333:h=720:color=${NAVY}@0.82:t=fill[p1];"
+    # Panel drawn directly onto the video+labels plate. (A crossfade
+    # entrance animation was tried here — split into two copies and
+    # blend them in over 0.5s — but benchmarking showed `blend`'s
+    # per-pixel expression evaluation runs on every frame for the
+    # entire video, not just the fade window, and alone accounted for
+    # roughly 85-90% of total render time (measured: ~8x slower with it
+    # than without, on identical filter graphs). On a CPU-constrained
+    # 24/7 stream that's not a trade worth making for a cosmetic fade,
+    # so the panel now just appears directly, the same reliable/cheap
+    # way every other element in this script is drawn.
+    CHAIN+="${LABELS_OUT}drawbox=x=0:y=0:w=333:h=720:color=${NAVY}@0.82:t=fill[p1];"
     CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=${NAVY}@0.62:t=fill[p2];"
     CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=${NAVY}@0.42:t=fill[p3];"
     CHAIN+="[p3]drawbox=x=341:y=0:w=4:h=720:color=${NAVY}@0.24:t=fill[p3b];"
@@ -782,15 +774,8 @@ prepare_video_content() {
         done
     fi
 
-    # Panel entrance: crossfade panel_bg (video, no panel) into
-    # panel_full (video + complete panel) over the first 0.5s of real
-    # timestamp T. blend works on ordinary opaque frames — no alpha
-    # channel required — so this reliably fades the whole panel in
-    # every time a new video starts.
-    CHAIN+="[panel_bg][${prev}]blend=all_expr='A*(1-min(T/0.5\,1))+B*min(T/0.5\,1)'[with_panel];"
-
     BASE_CHAIN="$CHAIN"
-    FACT_END="with_panel"
+    FACT_END="$prev"
 }
 
 #############################################
