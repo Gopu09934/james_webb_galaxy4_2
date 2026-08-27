@@ -660,19 +660,25 @@ prepare_video_content() {
     build_labels_chain "$url"
     CHAIN+="$LABELS_CHAIN"
 
-    # The entire left info panel is built on its own transparent RGBA
-    # canvas (rather than drawn directly onto the video) so that, once
-    # complete, it can be faded and slid in as a single unit each time a
-    # new video starts — see the fade/overlay merge at the end of this
-    # function. format=rgba guarantees an alpha channel survives through
-    # every drawbox/drawtext step below.
-    CHAIN+="color=c=black@0.0:s=1280x720:r=30,format=rgba[panelcanvas];"
+    # Panel entrance: split the video+labels plate into two identical
+    # copies. One (panel_bg) stays untouched; the other (panel_src) gets
+    # the entire panel drawn on top of it exactly as before — drawbox's
+    # own alpha blending, which only works correctly when painting onto
+    # a normal opaque frame (as it does here), not onto a transparent
+    # RGBA canvas (an earlier version of this script tried that and the
+    # panel silently rendered with zero effective opacity — verified via
+    # pixel inspection, not just visual guesswork). The two copies are
+    # crossfaded together at the end of this function using `blend`,
+    # which ramps per-pixel over real timestamps and needs no alpha
+    # channel at all, so the panel fades in cleanly every time a new
+    # video starts without depending on that broken path.
+    CHAIN+="${LABELS_OUT}split=2[panel_bg][panel_src];"
 
     # Panel background: layered navy fill with a soft feathered edge
     # (five descending-opacity steps instead of a hard cutoff) so the
     # panel reads as a deep, glass-like plate rather than a flat black
     # rectangle stamped over the footage.
-    CHAIN+="[panelcanvas]drawbox=x=0:y=0:w=333:h=720:color=${NAVY}@0.82:t=fill[p1];"
+    CHAIN+="[panel_src]drawbox=x=0:y=0:w=333:h=720:color=${NAVY}@0.82:t=fill[p1];"
     CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=${NAVY}@0.62:t=fill[p2];"
     CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=${NAVY}@0.42:t=fill[p3];"
     CHAIN+="[p3]drawbox=x=341:y=0:w=4:h=720:color=${NAVY}@0.24:t=fill[p3b];"
@@ -688,10 +694,10 @@ prepare_video_content() {
     CHAIN+="[p6b]drawbox=x=34:y=27:w=10:h=10:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
     CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=20:x=52:y=23[p8];"
 
-    CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=${SILVER}@0.85:fontsize=14:x=313-text_w:y=19[p9];"
-    CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=14:x=313-text_w:y=39[p10];"
-    CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/subs.txt:reload=1:fontcolor=${SILVER}@0.85:fontsize=13:x=313-text_w:y=57[p10b];"
-    CHAIN+="[p10b]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/viewers.txt:reload=1:fontcolor=${SILVER}@0.85:fontsize=13:x=313-text_w:y=75[p10c];"
+    CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=${SILVER}@0.85:fontsize=14:x=313-text_w:y=19:${SHADOW}[p9];"
+    CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=14:x=313-text_w:y=39:${SHADOW}[p10];"
+    CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/subs.txt:reload=1:fontcolor=${SILVER}@0.85:fontsize=13:x=313-text_w:y=57:${SHADOW}[p10b];"
+    CHAIN+="[p10b]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/viewers.txt:reload=1:fontcolor=${SILVER}@0.85:fontsize=13:x=313-text_w:y=75:${SHADOW}[p10c];"
 
     # Kicker tag first (small gold tag with a left tick, documentary
     # "series eyebrow" style), then the main title, then the section
@@ -731,8 +737,8 @@ prepare_video_content() {
         prev="$nxt"
     done
 
-    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:text='STORY ${CURRENT_INDEX} OF ${TOTAL_VIDEOS}':fontcolor=${SILVER}@0.55:fontsize=9:x=33:y=$((PROGRESS_Y - 15))[pgcap];"
-    CHAIN+="[pgcap]drawbox=x=33:y=${PROGRESS_Y}:w=280:h=2:color=${SILVER}@0.18:t=fill[pg1];"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:text='STORY ${CURRENT_INDEX} OF ${TOTAL_VIDEOS}':fontcolor=${SILVER}@0.8:fontsize=10:x=33:y=$((PROGRESS_Y - 16)):${SHADOW}[pgcap];"
+    CHAIN+="[pgcap]drawbox=x=33:y=${PROGRESS_Y}:w=280:h=2:color=${SILVER}@0.35:t=fill[pg1];"
     CHAIN+="[pg1]drawbox=x=33:y=${PROGRESS_Y}:w='280*(mod(t\,${SLOT}))/${SLOT}':h=2:color=${GOLD}:t=fill[pg2];"
     prev="pg2"
 
@@ -776,14 +782,12 @@ prepare_video_content() {
         done
     fi
 
-    # Panel entrance: fade the finished panel canvas in (alpha 0->1 over
-    # its first 0.5s) while sliding it in a short distance from the
-    # left, then composite it onto the video+labels plate. Each call to
-    # run_video() launches a fresh ffmpeg process per video, so t=0 here
-    # really is "this video just started" — the panel animates in every
-    # time the stream cuts to a new clip instead of just sitting there.
-    CHAIN+="[${prev}]fade=t=in:st=0:d=0.5:alpha=1[panel_faded];"
-    CHAIN+="${LABELS_OUT}[panel_faded]overlay=x='if(lt(t\,0.5)\,-40*(1-t/0.5)\,0)':y=0:eval=frame[with_panel];"
+    # Panel entrance: crossfade panel_bg (video, no panel) into
+    # panel_full (video + complete panel) over the first 0.5s of real
+    # timestamp T. blend works on ordinary opaque frames — no alpha
+    # channel required — so this reliably fades the whole panel in
+    # every time a new video starts.
+    CHAIN+="[panel_bg][${prev}]blend=all_expr='A*(1-min(T/0.5\,1))+B*min(T/0.5\,1)'[with_panel];"
 
     BASE_CHAIN="$CHAIN"
     FACT_END="with_panel"
