@@ -84,8 +84,14 @@ STREAM_START_EPOCH=$(date +%s)
 # API creds aren't configured — the question
 # still rotates either way.
 #############################################
-POLL_CYCLE=600     # full switch cycle in seconds (10 min)
-POLL_WINDOW=300    # poll panel is visible for the first half of each cycle
+POLL_CYCLE=300     # a new poll question every 5 min
+POLL_WINDOW=45     # poll panel is only visible for the final 45s of
+                    # each cycle (a "reveal" moment) — the info panel
+                    # runs the rest of the time, and votes cast via
+                    # chat during that stretch are what the reveal
+                    # shows. Voting itself isn't gated by visibility:
+                    # `!vote 1`/`!vote 2` count for the whole 5-minute
+                    # window even while the info panel is on screen.
 BAR_CHARS=24       # width of the text-based vote bar, in characters
 POLLS_FILE="polls.txt"
 
@@ -249,7 +255,7 @@ trap 'kill "$CLOCK_PID" 2>/dev/null || true; [ -n "$SUBS_PID" ] && kill "$SUBS_P
 
 #############################################
 # Background poll writer: rotates the question
-# every POLL_CYCLE/2 seconds on wall-clock time
+# every POLL_CYCLE seconds on wall-clock time
 # (independent of which video is currently
 # playing) and, when API creds are available,
 # tallies `!vote 1` / `!vote 2` chat messages
@@ -710,13 +716,15 @@ prepare_video_content() {
     : "${TOTAL_VIDEOS:=1}"
     : "${VIDEO_START_OFFSET:=0}"
 
-    # Poll panel is visible for the first half of every POLL_CYCLE
-    # seconds of real broadcast time; info panel (headlines/facts) for
-    # the second half. VIDEO_START_OFFSET (set by run_video()) shifts
-    # ffmpeg's own per-process `t` back onto real wall-clock time so
-    # this stays in sync across video boundaries.
-    POLL_ENABLE="lt(mod(t+${VIDEO_START_OFFSET}\,${POLL_CYCLE})\,${POLL_WINDOW})"
-    INFO_ENABLE="gte(mod(t+${VIDEO_START_OFFSET}\,${POLL_CYCLE})\,${POLL_WINDOW})"
+    # Poll panel is visible only for the final POLL_WINDOW seconds of
+    # every POLL_CYCLE-second cycle — a brief "results reveal" — with
+    # the info panel (headlines/facts) running the rest of the time.
+    # VIDEO_START_OFFSET (set by run_video()) shifts ffmpeg's own
+    # per-process `t` back onto real wall-clock time so this stays in
+    # sync across video boundaries.
+    local poll_start=$((POLL_CYCLE - POLL_WINDOW))
+    POLL_ENABLE="gte(mod(t+${VIDEO_START_OFFSET}\,${POLL_CYCLE})\,${poll_start})"
+    INFO_ENABLE="lt(mod(t+${VIDEO_START_OFFSET}\,${POLL_CYCLE})\,${poll_start})"
 
     # Optional category chip (e.g. "EXOPLANETS", "BLACK HOLES") shown
     # next to the section header when a <basename>.category.txt file
@@ -886,8 +894,9 @@ prepare_video_content() {
     CHAIN+="[p12]drawbox=x=33:y=186:w=280:h=1:color=${GOLD}@0.35:t=fill[p13];"
 
     #########################################
-    # POLL PANEL (visible for the first half of
-    # every POLL_CYCLE seconds of real time)
+    # POLL PANEL (a brief results reveal — the
+    # final POLL_WINDOW seconds of every
+    # POLL_CYCLE-second cycle)
     #########################################
     CHAIN+="[p13]drawbox=x=33:y=202:w=8:h=8:color=${RED}:t=fill:enable='${POLL_ENABLE}'[pv1];"
     CHAIN+="[pv1]drawtext=fontfile=${FONT}:text='LIVE POLL':fontcolor=${GOLD}:fontsize=15:x=49:y=199:enable='${POLL_ENABLE}'[pv2];"
@@ -906,9 +915,9 @@ prepare_video_content() {
     CHAIN+="[pv11]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/poll_votes.txt:reload=1:expansion=none:fontcolor=${SILVER}@0.8:fontsize=11:x=33:y=440:enable='${POLL_ENABLE}':${SHADOW}[pv12];"
 
     #########################################
-    # INFO PANEL (headlines/facts — visible for
-    # the second half of every POLL_CYCLE
-    # seconds of real time)
+    # INFO PANEL (headlines/facts — the default,
+    # running for all but the final POLL_WINDOW
+    # seconds of each POLL_CYCLE)
     #########################################
     CHAIN+="[pv12]drawbox=x=33:y=202:w=8:h=8:color=${GOLD}:t=fill:enable='${INFO_ENABLE}'[p14];"
     CHAIN+="[p14]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=15:x=49:y=199:enable='${INFO_ENABLE}'[p16];"
