@@ -877,7 +877,7 @@ prepare_video_content() {
     CHAIN+="[p6b]drawbox=x=34:y=27:w=10:h=10:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
     CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=20:x=52:y=23[p8];"
 
-    CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=${SILVER}@0.85:fontsize=14:x=313-text_w:y=19:${SHADOW}[p9];"
+    CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Deep Space':fontcolor=${SILVER}@0.85:fontsize=14:x=313-text_w:y=19:${SHADOW}[p9];"
     CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=14:x=313-text_w:y=39:${SHADOW}[p10];"
     CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/subs.txt:reload=1:fontcolor=${SILVER}@0.85:fontsize=13:x=313-text_w:y=57:${SHADOW}[p10b];"
     CHAIN+="[p10b]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/viewers.txt:reload=1:fontcolor=${SILVER}@0.85:fontsize=13:x=313-text_w:y=75:${SHADOW}[p10c];"
